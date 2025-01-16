@@ -1,102 +1,118 @@
-import pygame
 import cv2
+import pandas as pd
 import numpy as np
 from ultralytics import YOLO
+from picamera2 import Picamera2, Preview
 from tracker import *
-import pandas as pd
+import cvzone
 
-# Initialize YOLO model
-model = YOLO('yolov8s.pt')
+# Initialize YOLO model (using lightweight YOLOv8 Nano)
+model = YOLO('yolov8n.pt')
 
-# Initialize PyGame
-pygame.init()
-screen_width, screen_height = 1020, 500
-screen = pygame.display.set_mode((screen_width, screen_height))
-pygame.display.set_caption("Person Tracker")
+# Set up PiCamera2
+picam2 = Picamera2()
+camera_config = picam2.create_preview_configuration(main={"size": (640, 360)})
+picam2.configure(camera_config)
+picam2.start()
 
-# OpenCV Webcam Capture
-cap = cv2.VideoCapture(0)
+# Initialize output video writer
+output = cv2.VideoWriter('output_final.avi', cv2.VideoWriter_fourcc(*'MJPG'), 30, (640, 360))
 
-# Read class list
-with open('coco.names', 'r') as f:
-    class_list = f.read().splitlines()
+# Load COCO class names
+with open('coco.names', 'r') as file:
+    class_list = file.read().splitlines()
 
+count = 0
+persondown = {}
 tracker = Tracker()
+counter1 = []
 
-cy1, cy2 = 300, 400
+personup = {}
+counter2 = []
+cy1 = 200
+cy2 = 300
 offset = 6
-counter1, counter2 = [], []
-persondown, personup = {}, {}
 
-clock = pygame.time.Clock()
+try:
+    while True:
+        # Capture frame from PiCamera
+        frame = picam2.capture_array()
 
-running = True
-while running:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+        count += 1
+        if count % 5 != 0:  # Skip more frames for better performance
+            continue
 
-    ret, frame = cap.read()
-    if not ret:
-        break
+        # Resize frame to reduce computation
+        frame = cv2.resize(frame, (640, 360))
 
-    # Resize and convert frame for PyGame
-    frame = cv2.resize(frame, (screen_width, screen_height))
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    frame_surface = pygame.surfarray.make_surface(np.flip(frame_rgb, axis=1))
+        # Run YOLO model
+        results = model.predict(frame, verbose=False)  # Suppress YOLO logs
 
-    # YOLO prediction
-    results = model.predict(frame)
-    detections = results[0].boxes.data
-    px = pd.DataFrame(detections).astype("float")
+        # Extract bounding box data
+        a = results[0].boxes.data
+        px = pd.DataFrame(a).astype("float")
 
-    detected_objects = []
-    for index, row in px.iterrows():
-        x1, y1, x2, y2, conf, cls = map(int, row[:6])
-        label = class_list[cls]
-        if label == 'person':
-            detected_objects.append([x1, y1, x2, y2])
+        detections = []
+        for _, row in px.iterrows():
+            x1, y1, x2, y2, _, cls = map(int, row)
+            if class_list[cls] == 'person':  # Filter for 'person' class
+                detections.append([x1, y1, x2, y2])
 
-    bbox_id = tracker.update(detected_objects)
-    for bbox in bbox_id:
-        x1, y1, x2, y2, obj_id = bbox
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        # Update tracker
+        bbox_id = tracker.update(detections)
+        for bbox in bbox_id:
+            x3, y3, x4, y4, obj_id = bbox
+            cx = (x3 + x4) // 2
+            cy = (y3 + y4) // 2
 
-        pygame.draw.circle(frame_surface, (255, 0, 255), (cx, cy), 4)
+            cv2.circle(frame, (cx, cy), 4, (255, 0, 255), -1)
 
-        # Logic for counting people
-        if cy1 - offset < cy < cy1 + offset:
-            pygame.draw.rect(frame_surface, (0, 0, 255), (x1, y1, x2 - x1, y2 - y1), 2)
-            persondown[obj_id] = (cx, cy)
+            # Downward motion detection
+            if cy1 - offset < cy < cy1 + offset:
+                cv2.rectangle(frame, (x3, y3), (x4, y4), (0, 0, 255), 2)
+                cvzone.putTextRect(frame, f'{obj_id}', (x3, y3), 1, 2)
+                persondown[obj_id] = (cx, cy)
 
-        if obj_id in persondown and cy2 - offset < cy < cy2 + offset:
-            if obj_id not in counter1:
-                counter1.append(obj_id)
+            if obj_id in persondown:
+                if cy2 - offset < cy < cy2 + offset:
+                    cv2.rectangle(frame, (x3, y3), (x4, y4), (0, 255, 255), 2)
+                    cvzone.putTextRect(frame, f'{obj_id}', (x3, y3), 1, 2)
+                    if obj_id not in counter1:
+                        counter1.append(obj_id)
 
-        if cy2 - offset < cy < cy2 + offset:
-            pygame.draw.rect(frame_surface, (0, 255, 0), (x1, y1, x2 - x1, y2 - y1), 2)
-            personup[obj_id] = (cx, cy)
+            # Upward motion detection
+            if cy2 - offset < cy < cy2 + offset:
+                cv2.rectangle(frame, (x3, y3), (x4, y4), (0, 255, 0), 2)
+                cvzone.putTextRect(frame, f'{obj_id}', (x3, y3), 1, 2)
+                personup[obj_id] = (cx, cy)
 
-        if obj_id in personup and cy1 - offset < cy < cy1 + offset:
-            if obj_id not in counter2:
-                counter2.append(obj_id)
+            if obj_id in personup:
+                if cy1 - offset < cy < cy1 + offset:
+                    cv2.rectangle(frame, (x3, y3), (x4, y4), (0, 255, 255), 2)
+                    cvzone.putTextRect(frame, f'{obj_id}', (x3, y3), 1, 2)
+                    if obj_id not in counter2:
+                        counter2.append(obj_id)
 
-    # Draw counting lines
-    pygame.draw.line(frame_surface, (0, 255, 0), (0, cy1), (screen_width, cy1), 2)
-    pygame.draw.line(frame_surface, (255, 255, 0), (0, cy2), (screen_width, cy2), 2)
+        # Draw lines
+        cv2.line(frame, (3, cy1), (637, cy1), (0, 255, 0), 2)
+        cv2.line(frame, (5, cy2), (639, cy2), (0, 255, 255), 2)
 
-    # Display counts
-    font = pygame.font.SysFont("Arial", 30)
-    down_text = font.render(f"Down: {len(counter1)}", True, (255, 255, 255))
-    up_text = font.render(f"Up: {len(counter2)}", True, (255, 255, 255))
-    screen.blit(frame_surface, (0, 0))
-    screen.blit(down_text, (50, 50))
-    screen.blit(up_text, (50, 100))
+        # Display counts
+        downcount = len(counter1)
+        upcount = len(counter2)
 
-    # Update display
-    pygame.display.flip()
-    clock.tick(30)
+        cvzone.putTextRect(frame, f'Down: {downcount}', (50, 60), 2, 2)
+        cvzone.putTextRect(frame, f'Up: {upcount}', (50, 160), 2, 2)
 
-# Clean up
-cap.release()
-pygame.quit()
+        # Write frame to output file
+        output.write(frame)
+
+        # Display frame (optional, disable for headless mode)
+        cv2.imshow('RGB', frame)
+        if cv2.waitKey(1) & 0xFF == 27:  # Exit on 'Esc' key
+            break
+finally:
+    # Clean up resources
+    picam2.stop()
+    output.release()
+    cv2.destroyAllWindows()
